@@ -9,6 +9,10 @@ log() {
     echo "[*] $1"
 }
 
+warn() {
+    echo "[~] $1"
+}
+
 error() {
     echo "[!] $1" >&2
 }
@@ -17,14 +21,25 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+is_interactive() {
+    [ -t 0 ] && [ -t 1 ]
+}
+
+ensure_parent_dir() {
+    local target="$1"
+    mkdir -p "$(dirname "$target")"
+}
+
 download_file() {
     local url="$1"
     local dest="$2"
 
+    ensure_parent_dir "$dest"
+
     if command_exists curl; then
-        curl -fsSL "$url" -o "$dest"
+        curl --fail --silent --show-error --location --retry 3 "$url" -o "$dest"
     elif command_exists wget; then
-        wget -qO "$dest" "$url"
+        wget -q --tries=3 -O "$dest" "$url"
     else
         error "Kein Download-Client gefunden. Installiere curl oder wget."
         return 1
@@ -63,7 +78,7 @@ safe_apt_update() {
     fi
 
     log "Aktualisiere Paketlisten..."
-    sudo apt-get update -y
+    sudo apt-get update
 }
 
 package_available() {
@@ -73,7 +88,7 @@ package_available() {
         return 0
     fi
 
-    if apt-cache policy "$pkg" 2>/dev/null | grep -qE 'Candidate:\s*(none|None)'; then
+    if ! apt-cache show "$pkg" >/dev/null 2>&1; then
         return 1
     fi
 
@@ -92,8 +107,13 @@ safe_install_packages() {
 
     local available=()
     local unavailable=()
+    local seen=()
 
     for pkg in "$@"; do
+        if [[ " ${seen[*]} " == *" $pkg "* ]]; then
+            continue
+        fi
+        seen+=("$pkg")
         if package_available "$pkg"; then
             available+=("$pkg")
         else
@@ -241,22 +261,41 @@ themes_and_icons_install() {
     esac
 }
 
+split_gsettings_key() {
+    local full_key="$1"
+    local schema="${full_key% *}"
+    local key="${full_key##* }"
+
+    if [ "$schema" = "$full_key" ] || [ -z "$key" ]; then
+        error "Ungültiger GSettings-Schlüssel: $full_key"
+        return 1
+    fi
+
+    printf '%s\n%s\n' "$schema" "$key"
+}
+
 set_gsettings_theme() {
-    local key="$1"
+    local full_key="$1"
     local value="$2"
+    local schema
+    local key
+
+    mapfile -t _gsettings_parts < <(split_gsettings_key "$full_key") || return 1
+    schema="${_gsettings_parts[0]}"
+    key="${_gsettings_parts[1]}"
 
     if ! gsettings_available; then
-        log "gsettings nicht verfügbar oder keine DBUS-Sitzung. Überspringe Theme-Aktivierung für $key."
+        warn "gsettings nicht verfügbar oder keine DBUS-Sitzung. Überspringe Theme-Aktivierung für $full_key."
         return 1
     fi
 
-    if ! gsettings writable "$key" >/dev/null 2>&1; then
-        log "Warnung: GSettings-Schlüssel $key ist nicht beschreibbar oder wird nicht unterstützt."
+    if ! gsettings writable "$schema" "$key" >/dev/null 2>&1; then
+        warn "GSettings-Schlüssel $full_key ist nicht beschreibbar oder wird nicht unterstützt."
         return 1
     fi
 
-    if ! gsettings set "$key" "$value" >/dev/null 2>&1; then
-        log "Warnung: Theme-Wert $value konnte für $key nicht gesetzt werden."
+    if ! gsettings set "$schema" "$key" "'$value'" >/dev/null 2>&1; then
+        warn "Theme-Wert $value konnte für $full_key nicht gesetzt werden."
         return 1
     fi
 }
@@ -267,24 +306,24 @@ activate_themes_and_icons() {
 
     case "$design" in
         minimalistic)
-            set_gsettings_theme org.gnome.desktop.interface gtk-theme "Adwaita"
-            set_gsettings_theme org.gnome.desktop.interface icon-theme "Adwaita"
-            set_gsettings_theme org.gnome.desktop.wm.preferences theme "Adwaita"
+            set_gsettings_theme "org.gnome.desktop.interface gtk-theme" "Adwaita"
+            set_gsettings_theme "org.gnome.desktop.interface icon-theme" "Adwaita"
+            set_gsettings_theme "org.gnome.desktop.wm.preferences theme" "Adwaita"
             ;;
         corporate)
-            set_gsettings_theme org.gnome.desktop.interface gtk-theme "Arc"
-            set_gsettings_theme org.gnome.desktop.interface icon-theme "Papirus"
-            set_gsettings_theme org.gnome.desktop.wm.preferences theme "Arc"
+            set_gsettings_theme "org.gnome.desktop.interface gtk-theme" "Arc"
+            set_gsettings_theme "org.gnome.desktop.interface icon-theme" "Papirus"
+            set_gsettings_theme "org.gnome.desktop.wm.preferences theme" "Arc"
             ;;
         windows_xp|hacker)
-            set_gsettings_theme org.gnome.desktop.interface gtk-theme "Windows XP Luna"
-            set_gsettings_theme org.gnome.desktop.interface icon-theme "Papirus"
-            set_gsettings_theme org.gnome.desktop.wm.preferences theme "Windows XP Luna"
+            set_gsettings_theme "org.gnome.desktop.interface gtk-theme" "Windows XP Luna"
+            set_gsettings_theme "org.gnome.desktop.interface icon-theme" "Papirus"
+            set_gsettings_theme "org.gnome.desktop.wm.preferences theme" "Windows XP Luna"
             ;;
         fsocietyhub)
-            set_gsettings_theme org.gnome.desktop.interface gtk-theme "gtk-master"
-            set_gsettings_theme org.gnome.desktop.interface icon-theme "Papirus-Dark"
-            set_gsettings_theme org.gnome.desktop.wm.preferences theme "gtk-master"
+            set_gsettings_theme "org.gnome.desktop.interface gtk-theme" "gtk-master"
+            set_gsettings_theme "org.gnome.desktop.interface icon-theme" "Papirus-Dark"
+            set_gsettings_theme "org.gnome.desktop.wm.preferences theme" "gtk-master"
             ;;
         *)
             error "Unbekanntes Design: $design"
@@ -293,26 +332,77 @@ activate_themes_and_icons() {
     esac
 }
 
+apply_wallpaper() {
+    local wallpaper_path="$1"
+    local wallpaper_tool="${2:-${CFG_WALLPAPER_TOOL:-feh}}"
+
+    if [ ! -f "$wallpaper_path" ]; then
+        warn "Wallpaper-Datei fehlt: $wallpaper_path"
+        return 1
+    fi
+
+    case "$wallpaper_tool" in
+        variety)
+            if command_exists variety; then
+                variety --set "$wallpaper_path" >/dev/null 2>&1 || warn "Variety konnte das Wallpaper nicht setzen."
+                return 0
+            fi
+            ;;
+        nitrogen)
+            if command_exists nitrogen && [ -n "${DISPLAY-}" ]; then
+                nitrogen --set-zoom-fill "$wallpaper_path" >/dev/null 2>&1 || warn "Nitrogen konnte das Wallpaper nicht setzen."
+                return 0
+            fi
+            ;;
+        swaybg)
+            if command_exists swaybg && [ -n "${WAYLAND_DISPLAY-}" ]; then
+                pkill -x swaybg >/dev/null 2>&1 || true
+                swaybg -i "$wallpaper_path" -m fill >/dev/null 2>&1 &
+                disown || true
+                return 0
+            fi
+            ;;
+        xwallpaper)
+            if command_exists xwallpaper && [ -n "${DISPLAY-}" ]; then
+                xwallpaper --zoom "$wallpaper_path" >/dev/null 2>&1 || warn "xwallpaper konnte das Wallpaper nicht setzen."
+                return 0
+            fi
+            ;;
+    esac
+
+    if command_exists feh && [ -n "${DISPLAY-}" ]; then
+        feh --bg-scale "$wallpaper_path" >/dev/null 2>&1 || warn "feh konnte das Wallpaper nicht setzen."
+        return 0
+    fi
+
+    warn "Kein kompatibles Wallpaper-Tool verfügbar oder keine grafische Sitzung erkannt."
+    return 1
+}
+
 config_i3_or_sway() {
     local design="$1"
+    local terminal_cmd="${CFG_TERMINAL:-alacritty}"
+    local font_name="${CFG_FONT:-FiraCode Nerd Font}"
+    local font_size="${CFG_FONT_SIZE:-10}"
+
     log "Konfiguriere i3/Sway für '$design'..."
 
     if command_exists i3; then
         mkdir -p "$HOME/.config/i3"
-        cat > "$HOME/.config/i3/config" <<'EOF'
+        cat > "$HOME/.config/i3/config" <<EOF
 set $mod Mod4
-font pango:FiraCode Nerd Font 10
-bindsym $mod+Return exec alacritty
+font pango:${font_name} ${font_size}
+bindsym $mod+Return exec ${terminal_cmd}
 exec --no-startup-id picom -b
 EOF
     fi
 
     if command_exists sway; then
         mkdir -p "$HOME/.config/sway"
-        cat > "$HOME/.config/sway/config" <<'EOF'
+        cat > "$HOME/.config/sway/config" <<EOF
 set $mod Mod4
-font pango:FiraCode Nerd Font 10
-bindsym $mod+Return exec alacritty
+font pango:${font_name} ${font_size}
+bindsym $mod+Return exec ${terminal_cmd}
 EOF
         mkdir -p "$HOME/.config/waybar"
         cat > "$HOME/.config/waybar/config" <<'EOF'
@@ -333,6 +423,8 @@ customize_desktop_environment() {
 
     local wallpaper_path
     local wallpaper_url
+
+    mkdir -p "$HOME/Pictures"
 
     case "$design" in
         minimalistic)
@@ -358,13 +450,13 @@ customize_desktop_environment() {
     esac
 
     if [ -n "$wallpaper_url" ] && ! [ -f "$wallpaper_path" ]; then
-        download_file "$wallpaper_url" "$wallpaper_path"
+        download_file "$wallpaper_url" "$wallpaper_path" || warn "Wallpaper konnte nicht heruntergeladen werden: $wallpaper_url"
     fi
 
-    if [ -n "${DISPLAY-}" ] && command_exists feh && [ -f "$wallpaper_path" ]; then
-        feh --bg-scale "$wallpaper_path" >/dev/null 2>&1 || log "Fehler beim Setzen der Hintergrundgrafik."
+    if [ -f "$wallpaper_path" ]; then
+        apply_wallpaper "$wallpaper_path" || true
     else
-        log "Kein Wallpaper gesetzt: feh nicht verfügbar, DISPLAY nicht gesetzt oder Bild fehlt."
+        warn "Kein Wallpaper gesetzt: Datei fehlt oder Download war nicht erfolgreich."
     fi
 
     if command_exists picom; then
@@ -524,15 +616,15 @@ manage_dot_files() {
     "${git_cmd[@]}" config --local status.showUntrackedFiles no >/dev/null 2>&1 || true
 
     local paths=()
-    [ -f "$HOME/.config/alacritty/alacritty.yml" ] && paths+=("$HOME/.config/alacritty/alacritty.yml")
-    [ -f "$HOME/.config/rofi/config.rasi" ] && paths+=("$HOME/.config/rofi/config.rasi")
-    [ -d "$HOME/.themes" ] && paths+=("$HOME/.themes")
-    [ -d "$HOME/.icons" ] && paths+=("$HOME/.icons")
+    [ -f "$HOME/.config/alacritty/alacritty.yml" ] && paths+=(".config/alacritty/alacritty.yml")
+    [ -f "$HOME/.config/rofi/config.rasi" ] && paths+=(".config/rofi/config.rasi")
+    [ -d "$HOME/.themes" ] && paths+=(".themes")
+    [ -d "$HOME/.icons" ] && paths+=(".icons")
 
     if [ "${#paths[@]}" -gt 0 ]; then
         "${git_cmd[@]}" add "${paths[@]}" >/dev/null 2>&1 || true
         if ! "${git_cmd[@]}" diff --cached --quiet --exit-code >/dev/null 2>&1; then
-            "${git_cmd[@]}" commit -m "Initial commit of dotfiles" >/dev/null 2>&1 || true
+            "${git_cmd[@]}" commit -m "Update dotfiles" >/dev/null 2>&1 || true
         else
             log "Keine Änderungen für Dotfiles zum Committen."
         fi
@@ -556,7 +648,9 @@ install_uv() {
         safe_install_packages python3-pip
     fi
 
-    python3 -m pip install --user uv >/dev/null 2>&1 || log "uv konnte nicht installiert werden."
+    python3 -m pip install --user uv --break-system-packages >/dev/null 2>&1 \
+        || python3 -m pip install --user uv >/dev/null 2>&1 \
+        || warn "uv konnte nicht installiert werden."
 }
 
 apply_design() {
@@ -763,7 +857,9 @@ EOF
 
 menu_header() {
     local title="$1"
-    clear
+    if is_interactive; then
+        clear
+    fi
     show_fsocietyhub_banner
     header_line
     cecho "$C_BCYAN" "  $title"
@@ -773,7 +869,7 @@ menu_header() {
 }
 
 show_option() {
-    local num="$1" label="$2" current="$3"
+    local num="$1" label="$2" current="${3:-}"
     if [ -n "$current" ]; then
         echo -e "  ${C_YELLOW}${num})${C_RESET} ${C_WHITE}${label}${C_RESET}  ${C_DIM}[aktuell: ${current}]${C_RESET}"
     else
@@ -801,6 +897,10 @@ confirm_action() {
 }
 
 press_enter() {
+    if ! is_interactive; then
+        return 0
+    fi
+
     echo -e "\n  ${C_DIM}[ Enter drücken um fortzufahren... ]${C_RESET}"
     read -r
 }
@@ -860,25 +960,30 @@ menu_select_wm() {
 
     local wms_x11=(i3 openbox bspwm fluxbox dwm xmonad)
     local wms_wayland=(sway hyprland river)
+    declare -A wm_options=()
 
     if [ "$ENV_DISPLAY_SERVER" = "Wayland" ]; then
         cecho "$C_YELLOW" "  Wayland-kompatible Window Manager:"
         for i in "${!wms_wayland[@]}"; do
+            wm_options["$((i+1))"]="${wms_wayland[$i]}"
             show_option "$((i+1))" "${wms_wayland[$i]}"
         done
         echo ""
         cecho "$C_YELLOW" "  X11 Window Manager (über XWayland):"
         for i in "${!wms_x11[@]}"; do
+            wm_options["$((i+10))"]="${wms_x11[$i]}"
             show_option "$((i+10))" "${wms_x11[$i]}"
         done
     else
         cecho "$C_YELLOW" "  X11 Window Manager:"
         for i in "${!wms_x11[@]}"; do
+            wm_options["$((i+1))"]="${wms_x11[$i]}"
             show_option "$((i+1))" "${wms_x11[$i]}"
         done
         echo ""
         cecho "$C_YELLOW" "  Wayland Window Manager:"
         for i in "${!wms_wayland[@]}"; do
+            wm_options["$((i+10))"]="${wms_wayland[$i]}"
             show_option "$((i+10))" "${wms_wayland[$i]}"
         done
     fi
@@ -890,21 +995,20 @@ menu_select_wm() {
 
     local c; c=$(prompt_choice)
     case "$c" in
-        1)  CFG_WM="i3" ;;
-        2)  CFG_WM="openbox" ;;
-        3)  CFG_WM="bspwm" ;;
-        4)  CFG_WM="fluxbox" ;;
-        5)  CFG_WM="dwm" ;;
-        6)  CFG_WM="xmonad" ;;
-        10) CFG_WM="sway" ;;
-        11) CFG_WM="hyprland" ;;
-        12) CFG_WM="river" ;;
         99)
             echo -e -n "  ${C_BCYAN}Window Manager Name: ${C_RESET}"
             read -r CFG_WM
             ;;
         0) return ;;
-        *) error "Ungültige Auswahl." ; press_enter ; return ;;
+        *)
+            if [ -n "${wm_options[$c]:-}" ]; then
+                CFG_WM="${wm_options[$c]}"
+            else
+                error "Ungültige Auswahl."
+                press_enter
+                return
+            fi
+            ;;
     esac
     cecho "$C_BGREEN" "  ✔ Window Manager gesetzt: $CFG_WM"
     save_settings
@@ -1371,9 +1475,14 @@ apply_custom_config() {
     # Nerd Fonts installieren
     nerd_fonts_install
 
+    # Preset-Assets installieren, damit 'auto' und Override-Fälle konsistent bleiben.
+    themes_and_icons_install "$CFG_DESIGN" || true
+
     # GTK Theme & Icons
-    if [ "$CFG_GTK_THEME" != "auto" ]; then
+    if [ "$CFG_GTK_THEME" = "auto" ] || [ "$CFG_ICON_THEME" = "auto" ]; then
         activate_themes_and_icons "$CFG_DESIGN" || true
+    fi
+    if [ "$CFG_GTK_THEME" != "auto" ]; then
         if gsettings_available && [ -n "$CFG_GTK_THEME" ]; then
             gsettings set org.gnome.desktop.interface gtk-theme "$CFG_GTK_THEME" 2>/dev/null || true
         fi
@@ -1652,6 +1761,11 @@ main() {
                 ;;
         esac
     else
+        if ! is_interactive; then
+            error "Kein interaktives Terminal erkannt. Verwende --help für CLI-Optionen."
+            print_help
+            exit 1
+        fi
         show_main_menu
     fi
 }

@@ -1,11 +1,24 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 set -euo pipefail
+IFS=$'\n\t'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 log() {
 	echo "[FSOCIETYHUB] $1"
+}
+
+warn() {
+	echo "[FSOCIETYHUB][WARN] $1"
+}
+
+error() {
+	echo "[FSOCIETYHUB][ERROR] $1" >&2
+}
+
+command_exists() {
+	command -v "$1" >/dev/null 2>&1
 }
 
 show_fsocietyhub_banner() {
@@ -23,18 +36,67 @@ append_if_missing() {
 	local line="$1"
 	local file="$2"
 
+	touch "$file"
 	grep -Fqx "$line" "$file" || echo "$line" >> "$file"
 }
 
-install_base_dependencies() {
+safe_apt_update() {
+	if ! command_exists apt-get; then
+		error "apt-get ist auf diesem System nicht verfügbar."
+		return 1
+	fi
+
 	log "[...] Updating package lists..."
-	sudo apt update
+	sudo apt-get update
+}
+
+package_available() {
+	local pkg="$1"
+
+	if ! command_exists apt-cache; then
+		return 0
+	fi
+
+	apt-cache show "$pkg" >/dev/null 2>&1
+}
+
+safe_install_packages() {
+	if [ "$#" -eq 0 ]; then
+		return 0
+	fi
+
+	local available=()
+	local unavailable=()
+
+	for pkg in "$@"; do
+		if package_available "$pkg"; then
+			available+=("$pkg")
+		else
+			unavailable+=("$pkg")
+		fi
+	done
+
+	if [ "${#unavailable[@]}" -gt 0 ]; then
+		warn "Skipping unavailable packages: ${unavailable[*]}"
+	fi
+
+	if [ "${#available[@]}" -eq 0 ]; then
+		warn "No installable packages left in this batch."
+		return 0
+	fi
+
+	log "[...] Installing packages: ${available[*]}"
+	sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${available[@]}"
+}
+
+install_base_dependencies() {
+	safe_apt_update
 
 	log "[...] Upgrading packages..."
 	sudo apt-get full-upgrade -y
 
 	log "[...] Installing base and virtualization dependencies..."
-	sudo apt install -y \
+	safe_install_packages \
 		python3-full \
 		python3-pip \
 		git \
@@ -47,7 +109,6 @@ install_base_dependencies() {
 		docker.io \
 		docker-compose \
 		virtualbox \
-		virtualbox-ext-pack \
 		virtualbox-dkms \
 		virtualbox-qt \
 		qemu-system-x86 \
@@ -58,9 +119,13 @@ install_base_dependencies() {
 		bridge-utils \
 		ovmf
 
+	warn "virtualbox-ext-pack wird nicht automatisch installiert, da dafür meist eine interaktive Lizenzbestätigung nötig ist."
+
 	log "[...] Installing uv package manager..."
 	if ! command -v uv >/dev/null 2>&1; then
-		python3 -m pip install --user uv --break-system-packages
+		python3 -m pip install --user uv --break-system-packages \
+			|| python3 -m pip install --user uv \
+			|| warn "uv konnte nicht installiert werden."
 	fi
 }
 
@@ -101,19 +166,26 @@ create_directories() {
 
 install_ollama() {
 	log "[...] Installing Ollama for local AI model hosting..."
+	if ! command_exists curl; then
+		warn "curl ist nicht installiert. Überspringe Ollama-Installation."
+		return 0
+	fi
+
 	if ! command -v ollama >/dev/null 2>&1; then
 		curl -fsSL https://ollama.com/install.sh | sh
 	fi
 	log "[...] Configuring Ollama service and permissions..."
 	sudo usermod -aG ollama "$USER" || true
-	log "[...] Starting Ollama service..."
-	sudo systemctl start ollama || true
-	sudo systemctl disable --now ollama || true
+	if command_exists systemctl && systemctl list-unit-files | grep -q '^ollama\.service'; then
+		log "[...] Enabling and starting Ollama service..."
+		sudo systemctl enable --now ollama || true
+	fi
 	log "[...] Ollama installation and configuration complete."
 }
 
 configure_shell() {
 	log "[...] Setting up PATH and aliases..."
+	touch "$HOME/.bashrc"
 	append_if_missing 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.bashrc"
 	append_if_missing 'alias ll="ls -alF"' "$HOME/.bashrc"
 	append_if_missing 'alias la="ls -A"' "$HOME/.bashrc"
@@ -123,7 +195,7 @@ configure_shell() {
 
 install_kali_toolsuite() {
 	log "[...] Installing Kali Linux tool suite..."
-	sudo apt-get install kali-linux-everything -y
+	safe_install_packages kali-linux-everything
 }
 
 main() {
