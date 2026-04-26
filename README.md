@@ -14,6 +14,7 @@ chmod +x setup.sh
 ```
 
 ![Setup Desktop](images/setup_desktop.png)
+
     
 ## Desktop Customization Script
 
