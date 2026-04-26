@@ -5,6 +5,12 @@ IFS=$'\n\t'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Global configuration
+VERBOSE=${VERBOSE:-0}
+DRY_RUN=${DRY_RUN:-0}
+FORCE_COLOR=${FORCE_COLOR:-1}
+REPORT_FILE="${HOME}/.config/kali-desktop/install_report.log"
+
 log() {
     echo "[*] $1"
 }
@@ -17,12 +23,87 @@ error() {
     echo "[!] $1" >&2
 }
 
+debug() {
+    if [ "$VERBOSE" = "1" ]; then
+        echo "[DEBUG] $1" >&2
+    fi
+}
+
+success() {
+    echo -e "${C_BGREEN}[✔]${C_RESET} $1"
+}
+
 command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
 is_interactive() {
     [ -t 0 ] && [ -t 1 ]
+}
+
+# Modern utilities detection
+has_fzf() {
+    command_exists fzf && [ -t 0 ]
+}
+
+has_bat() {
+    command_exists bat || command_exists batcat
+}
+
+get_bat_cmd() {
+    if command_exists bat; then
+        echo "bat"
+    elif command_exists batcat; then
+        echo "batcat"
+    fi
+}
+
+# Progress spinner
+spinner() {
+    local pid=$!
+    local delay=0.1
+    local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+    
+    while kill -0 $pid 2>/dev/null; do
+        for frame in "${frames[@]}"; do
+            echo -ne "\r${C_BCYAN}${frame}${C_RESET} Installiere..."
+            sleep $delay
+        done
+    done
+    echo -ne "\r${C_BGREEN}✔${C_RESET} Abgeschlossen!\n"
+}
+
+# Progress bar
+show_progress() {
+    local current=$1
+    local total=$2
+    local width=30
+    
+    if [ "$total" -eq 0 ]; then
+        return
+    fi
+    
+    local percent=$((current * 100 / total))
+    local filled=$((percent * width / 100))
+    
+    echo -ne "\r${C_BCYAN}["
+    for ((i = 0; i < filled; i++)); do
+        echo -ne "█"
+    done
+    for ((i = filled; i < width; i++)); do
+        echo -ne "░"
+    done
+    echo -ne "] ${percent}%${C_RESET}"
+}
+
+# Installation report tracking
+log_installation() {
+    local action="$1"
+    local details="$2"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    
+    mkdir -p "$(dirname "$REPORT_FILE")"
+    echo "[${timestamp}] ${action}: ${details}" >> "$REPORT_FILE"
 }
 
 ensure_parent_dir() {
@@ -1061,10 +1142,37 @@ prompt_choice() {
     printf '%s\n' "$choice"
 }
 
+# Modern FZF-based selection (fallback to standard if no tty)
+select_from_list() {
+    local prompt="$1"
+    shift
+    local options=("$@")
+    
+    if has_fzf && [ "${#options[@]}" -gt 3 ]; then
+        printf '%s\n' "${options[@]}" | fzf --height 50% \
+            --preview-window=right:30% \
+            --prompt "${C_BCYAN}${prompt}${C_RESET} > " \
+            --color="bg:233,bg+:235,hl:184,hl+:184" \
+            --no-info --header "Nutze ↑↓ zum Navigieren, Enter zum Bestätigen, ESC zum Abbrechen"
+    else
+        # Fallback: standard menu
+        local i=1
+        for opt in "${options[@]}"; do
+            echo -e "  ${C_YELLOW}${i})${C_RESET} $opt"
+            ((i++))
+        done
+        echo -e -n "  ${C_BCYAN}▶ Auswahl: ${C_RESET}" >&2
+        read -r choice
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#options[@]}" ]; then
+            echo "${options[$((choice-1))]}"
+        fi
+    fi
+}
+
 confirm_action() {
     local msg="$1"
     echo -e "\n  ${C_YELLOW}${msg}${C_RESET}"
-    echo -e -n "  ${C_BOLD}Fortfahren? [j/N]: ${C_RESET}"
+    echo -e -n "  ${C_BOLD}Fortfahren? [j/N]: ${C_RESET}" >&2
     read -r yn
     [[ "${yn,,}" == "j" || "${yn,,}" == "ja" || "${yn,,}" == "y" || "${yn,,}" == "yes" ]]
 }
@@ -1909,20 +2017,58 @@ menu_quick_setup() {
 
 print_help() {
     cat <<EOF
-Verwendung: ./custom.sh [OPTION]
+${C_BGREEN}╔════════════════════════════════════════════════════════════════╗${C_RESET}
+${C_BGREEN}║      KALI LINUX DESKTOP CONFIGURATOR - Komplett Guide         ║${C_RESET}
+${C_BGREEN}╚════════════════════════════════════════════════════════════════╝${C_RESET}
 
-Optionen:
-  --mode <name>      Lade einen vordefinierten Kali Mode (pentester, corporate, fsociety, xfce)
-  --design <name>    Wende ein Design an (minimalistic, corporate, windows_xp, fsocietyhub)
-  --list-modes       Zeige alle verfügbaren Kali Modes an
-  --restore          Stelle den zuletzt gespeicherten Desktop-Zustand wieder her
-  --status           Zeige Systemstatus und Konfiguration an
-  --help             Zeige diese Hilfe an
+${C_BCYAN}GRUNDLEGENDE VERWENDUNG:${C_RESET}
+  ./custom.sh                    # Interaktives Menü starten
 
-Beispiele:
-  ./custom.sh --mode pentester          # Pentester-Mode anwenden
-  ./custom.sh --design fsocietyhub      # Fsociety-Design direkt anwenden
-  ./custom.sh --list-modes              # Alle verfügbaren Modi auflisten
+${C_BCYAN}KALI MODES (Vordefinierte Konfigurationen):${C_RESET}
+  ./custom.sh --mode <name>      # Mode laden: pentester, corporate, fsociety, xfce
+  ./custom.sh --list-modes       # Alle verfügbaren Modi anzeigen
+
+${C_BCYAN}DESIGNS (Theme-Presets):${C_RESET}
+  ./custom.sh --design <name>    # Design: minimalistic, corporate, windows_xp, fsocietyhub
+
+${C_BCYAN}SYSTEM VERWALTUNG:${C_RESET}
+  ./custom.sh --status           # System-Status & Installation-Historie anzeigen
+  ./custom.sh --restore          # Letztes Backup wiederherstellen
+  ./custom.sh --report           # Installation-Report anzeigen
+
+${C_BCYAN}ERWEITERTE OPTIONEN:${C_RESET}
+  ./custom.sh -v / --verbose     # Verbose Output (Debug-Informationen)
+  ./custom.sh --dry-run          # Dry-Run: Zeige was gemacht würde (ohne Änderungen)
+  ./custom.sh -h / --help        # Diese Hilfe anzeigen
+
+${C_BCYAN}BEISPIELE:${C_RESET}
+  ./custom.sh --mode pentester          # Pentester-Mode + interaktives Menü
+  ./custom.sh --design fsocietyhub -v   # Design mit Verbose-Output
+  ./custom.sh --verbose --mode corporate # Corporate Mode mit Debug-Infos
+  ./custom.sh --dry-run --mode fsociety # Zeige was passieren würde
+
+${C_BCYAN}AUTOMATISIERUNG:${C_RESET}
+  VERBOSE=1 ./custom.sh --mode pentester    # ENV-Variable setzen
+  DRY_RUN=1 ./custom.sh --design corporate  # Testen ohne Änderungen
+
+${C_BCYAN}DATEIEN & VERZEICHNISSE:${C_RESET}
+  Konfiguration:    ~/.config/kali-desktop/settings.conf
+  Installation Log: ~/.config/kali-desktop/install_report.log
+  Modes Definitionen: ~/.config/kali-desktop/modes/
+  Backups:          ~/.desktop_backup/
+
+${C_BCYAN}ANFORDERUNGEN:${C_RESET}
+  - bash 4.0+
+  - apt-get, git, curl/wget
+  - Empfohlen: fzf (bessere Menü-Auswahl)
+  - Optional: bat, ripgrep (bessere Ausgaben)
+
+${C_BCYAN}MODERNE UNIX-TOOLS:${C_RESET}
+  Das Script unterstützt automatisch:
+  • fzf - Interaktive Menü-Auswahl (fuzzy finder)
+  • bat - Bessere Syntax-Highlighting für Configs
+  • ripgrep - Schnelle Dateien-Suche
+
 EOF
 }
 
@@ -1954,16 +2100,84 @@ show_main_menu() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# INSTALLATION REPORT & SUMMARY
+# ─────────────────────────────────────────────────────────────────────────────
+
+show_installation_report() {
+    if [ ! -f "$REPORT_FILE" ]; then
+        return
+    fi
+    
+    menu_header "INSTALLATION REPORT"
+    echo ""
+    cecho "$C_BCYAN" "  ── Installations-Verlauf ────────────────────────────────"
+    echo ""
+    
+    if command_exists tail; then
+        tail -n 20 "$REPORT_FILE" | while read -r line; do
+            echo -e "  ${C_DIM}${line}${C_RESET}"
+        done
+    else
+        cat "$REPORT_FILE" | while read -r line; do
+            echo -e "  ${C_DIM}${line}${C_RESET}"
+        done
+    fi
+    
+    echo ""
+    cecho "$C_BGREEN" "  ✔ Report gespeichert: $REPORT_FILE"
+    press_enter
+}
+
+create_installation_summary() {
+    local mode="$1"
+    local duration="$2"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    
+    menu_header "INSTALLATION ABGESCHLOSSEN"
+    echo ""
+    cecho "$C_BGREEN" "  ✔ Mode erfolgreich installiert!"
+    echo ""
+    cecho "$C_BCYAN" "  ── Details ───────────────────────────────────────────────"
+    echo -e "  ${C_DIM}Mode:${C_RESET}           $mode"
+    echo -e "  ${C_DIM}Zeitstempel:${C_RESET}    $timestamp"
+    echo -e "  ${C_DIM}Dauer:${C_RESET}          ${duration}s"
+    echo -e "  ${C_DIM}Report:${C_RESET}         $REPORT_FILE"
+    
+    echo ""
+    cecho "$C_YELLOW" "  Nächste Schritte:"
+    echo -e "  ${C_DIM}1. Starte deine Sitzung neu (Logout/Login)${C_RESET}"
+    echo -e "  ${C_DIM}2. Öffne eine neue Terminal-Sitzung${C_RESET}"
+    echo -e "  ${C_DIM}3. Starte ./custom.sh erneut für weitere Anpassungen${C_RESET}"
+    
+    echo ""
+    press_enter
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # EINSTIEGSPUNKT
 # ─────────────────────────────────────────────────────────────────────────────
 
 main() {
+    local start_time=$(date +%s)
+    
     detect_environment
     define_kali_modes
     load_settings
 
     if [ "$#" -gt 0 ]; then
         case "$1" in
+            --verbose|-v)
+                VERBOSE=1
+                debug "Verbose mode aktiviert"
+                shift
+                [ "$#" -gt 0 ] && "$@" || show_main_menu
+                ;;
+            --dry-run)
+                DRY_RUN=1
+                warn "DRY-RUN Modus: Keine Änderungen werden durchgeführt"
+                shift
+                [ "$#" -gt 0 ] && "$@" || show_main_menu
+                ;;
             --design)
                 if [ "$#" -lt 2 ]; then
                     error "Fehlendes Design-Argument."
