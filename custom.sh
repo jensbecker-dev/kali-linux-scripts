@@ -661,6 +661,7 @@ apply_design() {
         design="windows_xp"
     fi
 
+    clean_previous_installation "$design"
     backup_current_setup
     install_custom_dependencies
     nerd_fonts_install
@@ -675,8 +676,12 @@ apply_design() {
     finetuning_and_optimizations
     manage_dot_files
     install_uv
+    
+    # Track installation
+    track_installation "$design"
 
-    log "Design '$design' angewendet. Bitte starte deine Sitzung neu, um alle Änderungen zu übernehmen."
+    cecho "$C_BGREEN" "\n  ✔ Design '$design' erfolgreich angewendet."
+    cecho "$C_YELLOW" "  Bitte starte deine Sitzung neu, um alle Änderungen zu übernehmen."
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -774,6 +779,8 @@ detect_environment() {
 
 SETTINGS_DIR="$HOME/.config/kali-desktop"
 SETTINGS_FILE="$SETTINGS_DIR/settings.conf"
+INSTALL_TRACKER_FILE="$SETTINGS_DIR/installed.conf"
+MODES_DIR="$SETTINGS_DIR/modes"
 
 # Aktuelle Konfigurationswerte (Defaults)
 CFG_DESIGN="fsocietyhub"
@@ -839,6 +846,166 @@ EOF
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# INSTALLATION TRACKING & KALI MODES MANAGEMENT
+# ─────────────────────────────────────────────────────────────────────────────
+
+track_installation() {
+    local mode="$1"
+    local timestamp="$(date '+%Y-%m-%d %H:%M:%S')"
+    
+    mkdir -p "$SETTINGS_DIR"
+    
+    # Append to installation tracker
+    echo "${mode}|${timestamp}|installed" >> "$INSTALL_TRACKER_FILE"
+    log "Installation von '$mode' getracked: $INSTALL_TRACKER_FILE"
+}
+
+get_installed_modes() {
+    if [ ! -f "$INSTALL_TRACKER_FILE" ]; then
+        return
+    fi
+    
+    awk -F'|' '$3 == "installed" {print $1}' "$INSTALL_TRACKER_FILE" | sort -u
+}
+
+is_mode_installed() {
+    local mode="$1"
+    if [ ! -f "$INSTALL_TRACKER_FILE" ]; then
+        return 1
+    fi
+    
+    grep -q "^${mode}|" "$INSTALL_TRACKER_FILE" && return 0
+    return 1
+}
+
+clean_previous_installation() {
+    local new_mode="$1"
+    
+    log "Bereite vorherige Installation auf für neuen Mode: $new_mode"
+    
+    # Remove old theme configs if switching modes
+    if [ -d "$HOME/.config/i3" ]; then
+        rm -rf "$HOME/.config/i3" || true
+    fi
+    
+    if [ -d "$HOME/.config/sway" ]; then
+        rm -rf "$HOME/.config/sway" || true
+    fi
+    
+    if [ -d "$HOME/.config/alacritty" ]; then
+        rm -rf "$HOME/.config/alacritty" || true
+    fi
+    
+    log "Aufräumen abgeschlossen."
+}
+
+# Define Kali Modes with presets
+define_kali_modes() {
+    mkdir -p "$MODES_DIR"
+    
+    # PENTESTER MODE - Max security tools, minimal eye candy
+    cat > "$MODES_DIR/pentester.conf" <<'EOF'
+MODE_NAME="Pentester"
+MODE_DESC="Optimiert für Penetrationstests – Sicherheitstools, minimalistische GUI"
+CFG_DESIGN="minimalistic"
+CFG_WM="i3"
+CFG_COMPOSITOR="picom"
+CFG_TERMINAL="alacritty"
+CFG_LAUNCHER="rofi"
+CFG_BAR="polybar"
+CFG_NOTIFICATIONS="dunst"
+CFG_GTK_THEME="Adwaita"
+CFG_ICON_THEME="Papirus"
+EOF
+    
+    # CORPORATE MODE - Professional look
+    cat > "$MODES_DIR/corporate.conf" <<'EOF'
+MODE_NAME="Corporate"
+MODE_DESC="Professionelle Umgebung – Arc-Theme, standardisiert"
+CFG_DESIGN="corporate"
+CFG_WM="auto"
+CFG_COMPOSITOR="picom"
+CFG_TERMINAL="gnome-terminal"
+CFG_LAUNCHER="rofi"
+CFG_BAR="waybar"
+CFG_NOTIFICATIONS="mako"
+CFG_GTK_THEME="Arc"
+CFG_ICON_THEME="Papirus"
+EOF
+    
+    # FSOCIETY MODE - Dark, Hacker-style
+    cat > "$MODES_DIR/fsociety.conf" <<'EOF'
+MODE_NAME="Fsociety"
+MODE_DESC="Hacker-Ästhetik – Dracula-Theme, grün-auf-schwarz"
+CFG_DESIGN="fsocietyhub"
+CFG_WM="i3"
+CFG_COMPOSITOR="picom"
+CFG_TERMINAL="alacritty"
+CFG_LAUNCHER="rofi"
+CFG_BAR="polybar"
+CFG_NOTIFICATIONS="dunst"
+CFG_GTK_THEME="Dracula"
+CFG_ICON_THEME="Papirus-Dark"
+EOF
+    
+    # XFCE MODE - Lightweight, classic
+    cat > "$MODES_DIR/xfce.conf" <<'EOF'
+MODE_NAME="XFCE Classic"
+MODE_DESC="Leichtgewichtig – XFCE mit Standardkomponenten"
+CFG_DESIGN="minimalistic"
+CFG_WM="xfwm4"
+CFG_COMPOSITOR="keiner"
+CFG_TERMINAL="xfce4-terminal"
+CFG_LAUNCHER="rofi"
+CFG_BAR="xfce4-panel"
+CFG_NOTIFICATIONS="xfce4-notifyd"
+CFG_GTK_THEME="Adwaita"
+CFG_ICON_THEME="Papirus"
+EOF
+    
+    log "Kali Modes definiert in: $MODES_DIR"
+}
+
+load_kali_mode() {
+    local mode="$1"
+    local mode_file="$MODES_DIR/${mode}.conf"
+    
+    if [ ! -f "$mode_file" ]; then
+        error "Modus-Datei nicht gefunden: $mode_file"
+        return 1
+    fi
+    
+    log "Lade Kali Mode: $mode"
+    source "$mode_file"
+}
+
+list_kali_modes() {
+    local modes=()
+    if [ -d "$MODES_DIR" ]; then
+        for f in "$MODES_DIR"/*.conf; do
+            [ -f "$f" ] && modes+=("$(basename "$f" .conf)")
+        done
+    fi
+    printf '%s\n' "${modes[@]}"
+}
+
+get_mode_info() {
+    local mode="$1"
+    local mode_file="$MODES_DIR/${mode}.conf"
+    
+    if [ ! -f "$mode_file" ]; then
+        return 1
+    fi
+    
+    while IFS='=' read -r key value; do
+        [[ "$key" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "$key" ]] && continue
+        value="${value//\"/}"
+        echo "${key}=${value}"
+    done < "$mode_file"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # BANNER & MENÜ-HELFER
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -882,10 +1049,16 @@ show_back() {
 }
 
 prompt_choice() {
-    echo ""
-    echo -e -n "  ${C_BCYAN}▶ Auswahl: ${C_RESET}"
+    # Send prompts to stderr so they don't interfere with stdout capture
+    echo "" >&2
+    echo -e -n "  ${C_BCYAN}▶ Auswahl: ${C_RESET}" >&2
+    local choice
     read -r choice
-    echo "$choice"
+    # Trim leading and trailing whitespace
+    choice="${choice#[[:space:]]*}"
+    choice="${choice%[[:space:]]*}"
+    # Output ONLY the value to stdout (for command substitution)
+    printf '%s\n' "$choice"
 }
 
 confirm_action() {
@@ -934,6 +1107,24 @@ show_status() {
     echo -e "  ${C_DIM}GTK Theme:${C_RESET}       $CFG_GTK_THEME"
     echo -e "  ${C_DIM}Icon Theme:${C_RESET}      $CFG_ICON_THEME"
     echo -e "  ${C_DIM}Schrift:${C_RESET}         $CFG_FONT $CFG_FONT_SIZE"
+
+    echo ""
+    cecho "$C_BCYAN" "  ── Installierte Kali Modes ────────────────────────────"
+    local installed_modes=$(get_installed_modes)
+    if [ -z "$installed_modes" ]; then
+        echo -e "  ${C_DIM}Keine Modi installiert. Wende einen Mode an, um zu beginnen.${C_RESET}"
+    else
+        echo "$installed_modes" | while read -r mode; do
+            echo -e "  ${C_BGREEN}✔${C_RESET} $mode"
+        done
+    fi
+
+    echo ""
+    cecho "$C_BCYAN" "  ── Verfügbare Kali Modes ──────────────────────────────"
+    while IFS= read -r mode; do
+        local mode_name=$(grep "^MODE_NAME=" "$MODES_DIR/${mode}.conf" 2>/dev/null | cut -d'=' -f2 | tr -d '"')
+        echo -e "  • $mode_name ($mode)"
+    done < <(list_kali_modes)
 
     echo ""
     cecho "$C_BCYAN" "  ── Installierte Tools ─────────────────────────────────"
@@ -1652,35 +1843,62 @@ menu_backup() {
 # ─────────────────────────────────────────────────────────────────────────────
 
 menu_quick_setup() {
-    menu_header "SCHNELL-SETUP – DESIGN IN EINEM SCHRITT"
+    menu_header "SCHNELL-SETUP – KALI MODES"
     echo ""
-    cecho "$C_DIM" "  Wendet ein vollständiges Design-Preset auf dein System an."
-    cecho "$C_DIM" "  Alle Abhängigkeiten werden automatisch installiert."
+    cecho "$C_DIM" "  Wende einen vorgefertigten Kali Mode an."
+    cecho "$C_DIM" "  Alle Komponenten werden automatisch installiert und konfiguriert."
     echo ""
-    show_option "1" "Minimalistic   " "sauber, kein Overhead"
-    show_option "2" "Corporate      " "Arc-Theme, professionell"
-    show_option "3" "Windows XP     " "Luna-Theme, nostalgisch"
-    show_option "4" "Fsocietyhub    " "Dracula/Grün-auf-Schwarz, Hacker-Ästhetik"
+    
+    local modes=()
+    local mode_names=()
+    local mode_index=1
+    
+    # Load and display all available modes
+    while IFS= read -r mode; do
+        modes+=("$mode")
+        # Get mode name from conf file
+        local mode_name=$(grep "^MODE_NAME=" "$MODES_DIR/${mode}.conf" 2>/dev/null | cut -d'=' -f2 | tr -d '"')
+        local mode_desc=$(grep "^MODE_DESC=" "$MODES_DIR/${mode}.conf" 2>/dev/null | cut -d'=' -f2 | tr -d '"')
+        mode_names+=("$mode_name")
+        
+        local installed_marker=""
+        if is_mode_installed "$mode"; then
+            installed_marker=" ✔"
+        fi
+        
+        show_option "$mode_index" "$mode_name$installed_marker" "$mode_desc"
+        ((mode_index++))
+    done < <(list_kali_modes)
+    
     echo ""
     show_back
     echo ""
-    cecho "$C_DIM" "  Aktuelles Design-Preset: $CFG_DESIGN"
+    cecho "$C_DIM" "  Aktueller Mode: $CFG_DESIGN"
 
     local c; c=$(prompt_choice)
-    local design=""
-    case "$c" in
-        1) design="minimalistic" ;;
-        2) design="corporate" ;;
-        3) design="windows_xp" ;;
-        4) design="fsocietyhub" ;;
-        0) return ;;
-        *) error "Ungültige Auswahl." ; press_enter ; return ;;
-    esac
-
-    if confirm_action "Design '$design' anwenden? (Backups werden erstellt)"; then
-        CFG_DESIGN="$design"
-        save_settings
-        apply_design "$design"
+    
+    if [ "$c" = "0" ]; then
+        return
+    fi
+    
+    # Check if choice is valid
+    if ! [[ "$c" =~ ^[0-9]+$ ]]; then
+        error "Ungültige Auswahl."
+        press_enter
+        return
+    fi
+    
+    if [ "$c" -lt 1 ] || [ "$c" -gt "${#modes[@]}" ]; then
+        error "Ungültige Auswahl."
+        press_enter
+        return
+    fi
+    
+    local selected_mode="${modes[$((c-1))]}"
+    
+    if confirm_action "Mode '$selected_mode' anwenden? (Backups werden erstellt)"; then
+        load_kali_mode "$selected_mode"
+        apply_design "$CFG_DESIGN"
         press_enter
     fi
 }
@@ -1694,10 +1912,17 @@ print_help() {
 Verwendung: ./custom.sh [OPTION]
 
 Optionen:
+  --mode <name>      Lade einen vordefinierten Kali Mode (pentester, corporate, fsociety, xfce)
   --design <name>    Wende ein Design an (minimalistic, corporate, windows_xp, fsocietyhub)
+  --list-modes       Zeige alle verfügbaren Kali Modes an
   --restore          Stelle den zuletzt gespeicherten Desktop-Zustand wieder her
   --status           Zeige Systemstatus und Konfiguration an
   --help             Zeige diese Hilfe an
+
+Beispiele:
+  ./custom.sh --mode pentester          # Pentester-Mode anwenden
+  ./custom.sh --design fsocietyhub      # Fsociety-Design direkt anwenden
+  ./custom.sh --list-modes              # Alle verfügbaren Modi auflisten
 EOF
 }
 
@@ -1734,6 +1959,7 @@ show_main_menu() {
 
 main() {
     detect_environment
+    define_kali_modes
     load_settings
 
     if [ "$#" -gt 0 ]; then
@@ -1745,11 +1971,27 @@ main() {
                 fi
                 apply_design "$2"
                 ;;
+            --mode)
+                if [ "$#" -lt 2 ]; then
+                    error "Fehlendes Mode-Argument."
+                    exit 1
+                fi
+                load_kali_mode "$2"
+                apply_design "$CFG_DESIGN"
+                ;;
             --restore)
                 restore_backup
                 ;;
             --status)
                 show_status
+                ;;
+            --list-modes)
+                echo "Verfügbare Kali Modes:"
+                while IFS= read -r mode; do
+                    local mode_name=$(grep "^MODE_NAME=" "$MODES_DIR/${mode}.conf" 2>/dev/null | cut -d'=' -f2 | tr -d '"')
+                    local mode_desc=$(grep "^MODE_DESC=" "$MODES_DIR/${mode}.conf" 2>/dev/null | cut -d'=' -f2 | tr -d '"')
+                    printf "  %-15s %s\n" "$mode" "$mode_desc"
+                done < <(list_kali_modes)
                 ;;
             --help|-h)
                 print_help
