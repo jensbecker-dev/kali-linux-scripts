@@ -24,9 +24,6 @@ chmod +x custom.sh
 ./custom.sh
 ```
 
-![Custom Desktop](images/custom_desktop.png)
-
-
 ## License
 
 This repository is provided as-is. Check the repository license file for details.
